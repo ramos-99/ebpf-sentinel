@@ -1,7 +1,8 @@
 # src/probes/process.py
 """
 Process Monitor Probe
-Monitors process executions using eBPF kprobe on sys_execve.
+Monitors process executions using eBPF tracepoint on sys_enter_execve.
+Uses tracepoints instead of kprobes for better compatibility with modern kernels.
 """
 from bcc import BPF
 
@@ -10,47 +11,72 @@ class ProcessMonitor:
     """
     eBPF-based process execution monitor.
     
-    Attaches a kprobe to sys_execve to intercept all process
-    executions and reports them via perf buffer.
+    Attaches to the syscalls:sys_enter_execve tracepoint to intercept
+    all process executions and reports them via perf buffer.
+    
+    Why tracepoint instead of kprobe?
+    - Stable API: tracepoints are guaranteed to be stable across kernel versions
+    - Structured data: access to syscall args via args->field instead of PT_REGS
+    - Works reliably on modern kernels (5.x, 6.x)
     """
     
     def __init__(self):
         """Initialize and compile the eBPF program."""
         self.running = False
         
-        # eBPF C program
+        # =========================================================
+        # eBPF C program using TRACEPOINT instead of kprobe
+        # =========================================================
         self.bpf_program_text = """
-        #include <uapi/linux/ptrace.h>
         #include <linux/sched.h>
-
+        
+        // Data structure to send events to userspace
         struct data_t {
-            u32 pid;
-            u32 uid;
-            char comm[16];
-            char fname[256];
+            u32 pid;        // Process ID
+            u32 uid;        // User ID
+            char comm[16];  // Process name (before exec)
+            char fname[256]; // Filename being executed
         };
 
+        // Perf buffer for sending events to Python
         BPF_PERF_OUTPUT(events);
 
-        int kprobe__sys_execve(struct pt_regs *ctx) {
+        // =========================================================
+        // TRACEPOINT_PROBE: Attaches to syscalls:sys_enter_execve
+        // 
+        // This fires BEFORE execve executes, so:
+        //   - comm = parent process name (e.g., "bash")
+        //   - fname = what's being executed (e.g., "/usr/bin/ls")
+        //
+        // The args pointer gives us structured access to syscall args:
+        //   - args->filename: path of the executable
+        // =========================================================
+        TRACEPOINT_PROBE(syscalls, sys_enter_execve) {
             struct data_t data = {};
 
+            // Get current user ID (lower 32 bits of uid_gid)
             data.uid = bpf_get_current_uid_gid();
+            
+            // Get PID (actually TGID - Thread Group ID, which is the "real" PID)
             u64 id = bpf_get_current_pid_tgid();
-            data.pid = id >> 32; // Shift to get TGID (Thread Group ID)
+            data.pid = id >> 32;
 
+            // Get process name (this is still the parent's name, before exec)
             bpf_get_current_comm(&data.comm, sizeof(data.comm));
             
-            // Note: On very recent kernels, PT_REGS_PARM1 might need adjustments
-            // but on standard Arch it usually works out of the box.
-            bpf_probe_read_user_str(&data.fname, sizeof(data.fname), (void *)PT_REGS_PARM1(ctx));
+            // Read the filename from the tracepoint args
+            // args->filename is a pointer to the executable path in userspace
+            // This is the key improvement over kprobe - stable structured access!
+            bpf_probe_read_user_str(&data.fname, sizeof(data.fname), args->filename);
 
-            events.perf_submit(ctx, &data, sizeof(data));
+            // Send event to userspace via perf buffer
+            events.perf_submit(args, &data, sizeof(data));
             return 0;
         }
         """
         
         # Compile the eBPF program
+        # BCC automatically attaches TRACEPOINT_PROBE to the correct tracepoint
         self.bpf = BPF(text=self.bpf_program_text)
     
     def _handle_event(self, cpu, data, size):
@@ -64,13 +90,13 @@ class ProcessMonitor:
         """
         event = self.bpf["events"].event(data)
         
-        print(f"PID: {event.pid:<6} | UID: {event.uid:<6} | "
-              f"Process: {event.comm.decode('utf-8', 'replace'):<15} -> "
-              f"Executed: {event.fname.decode('utf-8', 'replace')}")
+        print(f"[PROCESS] PID: {event.pid:<6} | UID: {event.uid:<6} | "
+              f"{event.comm.decode('utf-8', 'replace'):<15} -> "
+              f"{event.fname.decode('utf-8', 'replace')}")
     
     def start(self):
         """Start the monitoring loop."""
-        print("⚡ Process Monitor Active... (Ctrl+C to exit)")
+        print("[PROCESS] ⚡ Monitor Active (tracepoint: sys_enter_execve)")
         
         # Attach the callback to the perf buffer
         self.bpf["events"].open_perf_buffer(self._handle_event)
@@ -85,4 +111,4 @@ class ProcessMonitor:
     def stop(self):
         """Stop the monitoring loop gracefully."""
         self.running = False
-        print("✅ Monitor stopped cleanly.")
+        print("[PROCESS] ✅ Stopped cleanly.")
