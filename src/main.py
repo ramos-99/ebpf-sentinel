@@ -7,13 +7,35 @@ import sys
 import signal
 import multiprocessing
 from src.probes.process import ProcessMonitor
+from src.probes.network import NetworkMonitor
 
-# wrapper function for processing monitor
+
+# =========================================================
+# Wrapper functions for each monitor
+#
+# Why wrappers? Two reasons:
+# 1. Isolate exceptions - if eBPF fails to load, it crashes
+#    inside the child process, not the parent
+# 2. Clean interface - each wrapper is a simple callable
+#    that multiprocessing.Process can target
+# =========================================================
+
 def run_process_monitor():
+    """Wrapper to run ProcessMonitor in a child process."""
     try:
         monitor = ProcessMonitor()
     except Exception as e:
-        print(f"❌ Critical error loading eBPF: {e}")
+        print(f"[PROCESS] ❌ Critical error loading eBPF: {e}")
+        sys.exit(1)
+    monitor.start()
+
+
+def run_network_monitor():
+    """Wrapper to run NetworkMonitor in a child process."""
+    try:
+        monitor = NetworkMonitor()
+    except Exception as e:
+        print(f"[NETWORK] ❌ Critical error loading eBPF: {e}")
         sys.exit(1)
     monitor.start()
 
@@ -47,11 +69,18 @@ def main():
     signal.signal(signal.SIGINT, graceful_shutdown)   # Ctrl+C
     signal.signal(signal.SIGTERM, graceful_shutdown)  # kill command
     
-    # Define monitors to run (scalable for future additions)
+    # =========================================================
+    # Monitor Registry
+    #
+    # To add a new monitor:
+    # 1. Create the class in src/probes/
+    # 2. Create a wrapper function above
+    # 3. Add tuple here: ("Name", wrapper_function)
+    # =========================================================
     monitors = [
         ("ProcessMonitor", run_process_monitor),
-        # ("NetworkMonitor", run_network_monitor),  # Phase 2
-        # ("FileMonitor", run_file_monitor),        # Phase 3
+        ("NetworkMonitor", run_network_monitor),
+        # ("FileMonitor", run_file_monitor),  # Phase 3
     ]
     
     # Start all monitors
