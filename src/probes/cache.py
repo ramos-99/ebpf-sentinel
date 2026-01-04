@@ -91,10 +91,10 @@ class ProcessCache:
         Returns:
             (pid, name) of first interesting ancestor, or (0, 'unknown')
         """
-        shells = {'bash', 'sh', 'zsh', 'fish', 'dash', 'tcsh', 'csh'}
+        from src.config import SHELL_NAMES
         
         for ancestor_pid, ancestor_name in self.get_ancestry(pid):
-            if ancestor_name not in shells:
+            if ancestor_name not in SHELL_NAMES:
                 return (ancestor_pid, ancestor_name)
         
-        return (0, 'unknown')
+        return (0, 'systemd')

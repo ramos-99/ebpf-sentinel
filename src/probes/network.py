@@ -1,163 +1,191 @@
 # src/probes/network.py
 """
 Network Monitor Probe
-Monitors outbound TCP connections using eBPF kprobe on tcp_v4_connect.
-
-Why kprobe instead of tracepoint here?
-- tcp_v4_connect gives direct access to struct sock
-- Avoids complex parsing of sockaddr from userspace
-- See /docs/decisions.md ADR-002 for full justification
+Monitors TCP connections (outbound and inbound) using eBPF.
+- Outbound: kprobe on tcp_v4_connect
+- Inbound: kretprobe on inet_csk_accept
 """
 from bcc import BPF
 import socket
 import struct
+import time
 
 
 class NetworkMonitor:
     """
     eBPF-based network connection monitor.
     
-    Attaches a kprobe to tcp_v4_connect to intercept all outbound
-    IPv4 TCP connections and reports them via perf buffer.
+    Monitors both outbound (connect) and inbound (accept) TCP connections.
     """
     
-    def __init__(self):
-        """Initialize and compile the eBPF program."""
+    # Direction constants (match C code)
+    DIR_OUTBOUND = 0
+    DIR_INBOUND = 1
+    
+    def __init__(self, queue):
+        """
+        Initialize and compile the eBPF program.
+        
+        Args:
+            queue: multiprocessing.Queue for sending events to TUI
+        """
+        self.queue = queue
         self.running = False
         
         # =========================================================
-        # eBPF C program - Kprobe on tcp_v4_connect
+        # eBPF C program with TWO probes:
+        # 1. kprobe__tcp_v4_connect - outbound connections
+        # 2. kretprobe__inet_csk_accept - inbound connections
         # =========================================================
         self.bpf_program_text = """
         #include <net/sock.h>
         
         // =========================================================
-        // STEP 1: Define the data structure
-        // 
-        // This struct will be sent from kernel to Python.
-        // Keep it simple - only what we need to display.
+        // UNIFIED struct for both connect and accept events
         // =========================================================
         struct net_data_t {
-            u32 pid;        // Process ID
-            u32 uid;        // User ID  
-            char comm[16];  // Process name
-            u32 daddr;      // Destination IP (32 bits, network byte order)
-            u16 dport;      // Destination Port (16 bits, network byte order)
+            u32 pid;
+            u32 uid;
+            char comm[16];
+            u32 daddr;      // Remote IP (destination for connect, source for accept)
+            u16 dport;      // Remote port
+            u16 lport;      // Local port (mainly useful for accept)
+            u8 direction;   // 0 = OUTBOUND (connect), 1 = INBOUND (accept)
         };
 
-        // Perf buffer - the "channel" to send events to Python
+        // Single perf buffer for both event types
         BPF_PERF_OUTPUT(net_events);
 
         // =========================================================
-        // STEP 2: The kprobe function
-        //
-        // Function signature matches tcp_v4_connect:
-        //   int tcp_v4_connect(struct sock *sk, ...)
-        //
-        // BCC magic: kprobe__<function_name> auto-attaches!
-        // The first arg after ctx is the first arg of the kernel function.
+        // OUTBOUND: kprobe on tcp_v4_connect
+        // 
+        // Fires when the local machine initiates a TCP connection.
+        // Example: browser connecting to google.com
         // =========================================================
         int kprobe__tcp_v4_connect(struct pt_regs *ctx, struct sock *sk) {
             struct net_data_t data = {};
 
-            // Get basic process info (same as process.py)
             data.uid = bpf_get_current_uid_gid();
             u64 id = bpf_get_current_pid_tgid();
             data.pid = id >> 32;
             bpf_get_current_comm(&data.comm, sizeof(data.comm));
 
-            // =========================================================
-            // STEP 3: Extract IP and Port from struct sock
-            //
-            // The kernel's struct sock has a common header: __sk_common
-            // Inside __sk_common:
-            //   - skc_daddr: destination IPv4 address
-            //   - skc_dport: destination port
-            //
-            // We use bpf_probe_read_kernel() for safe kernel memory access.
-            // Direct access (sk->__sk_common.skc_daddr) might fail
-            // the eBPF verifier on some kernels.
-            // =========================================================
+            // Read destination IP and port from socket
             bpf_probe_read_kernel(&data.daddr, sizeof(data.daddr), 
                                   &sk->__sk_common.skc_daddr);
             bpf_probe_read_kernel(&data.dport, sizeof(data.dport),
                                   &sk->__sk_common.skc_dport);
+            
+            // Local port not relevant for outbound (ephemeral port)
+            data.lport = 0;
+            
+            // Mark as outbound
+            data.direction = 0;
 
-            // Send to Python via perf buffer
+            net_events.perf_submit(ctx, &data, sizeof(data));
+            return 0;
+        }
+
+        // =========================================================
+        // INBOUND: kretprobe on inet_csk_accept
+        // 
+        // Fires when a connection is ACCEPTED (return of accept syscall).
+        // Example: SSH server accepting a client connection.
+        //
+        // Why kRETprobe?
+        // - At entry, the socket isn't ready yet
+        // - At return, we have the fully connected socket
+        // 
+        // PT_REGS_RC(ctx) = Return value = the accepted socket
+        // =========================================================
+        int kretprobe__inet_csk_accept(struct pt_regs *ctx) {
+            // Get the returned socket (the accepted connection)
+            struct sock *sk = (struct sock *)PT_REGS_RC(ctx);
+            
+            // Check if socket is valid
+            if (sk == NULL) {
+                return 0;
+            }
+
+            struct net_data_t data = {};
+
+            data.uid = bpf_get_current_uid_gid();
+            u64 id = bpf_get_current_pid_tgid();
+            data.pid = id >> 32;
+            bpf_get_current_comm(&data.comm, sizeof(data.comm));
+
+            // For accept, daddr is the REMOTE client's IP
+            // skc_daddr = destination address (from kernel's perspective)
+            bpf_probe_read_kernel(&data.daddr, sizeof(data.daddr), 
+                                  &sk->__sk_common.skc_daddr);
+            
+            // Remote client's port
+            bpf_probe_read_kernel(&data.dport, sizeof(data.dport),
+                                  &sk->__sk_common.skc_dport);
+            
+            // LOCAL port where we accepted the connection (e.g., 22 for SSH)
+            // skc_num = local port number (already in host byte order)
+            u16 lport;
+            bpf_probe_read_kernel(&lport, sizeof(lport), 
+                                  &sk->__sk_common.skc_num);
+            data.lport = lport;
+            
+            // Mark as inbound
+            data.direction = 1;
+
             net_events.perf_submit(ctx, &data, sizeof(data));
             return 0;
         }
         """
         
-        # Compile the eBPF program
-        # BCC auto-attaches kprobe__tcp_v4_connect to the kernel function
         self.bpf = BPF(text=self.bpf_program_text)
     
-    # =========================================================
-    # STEP 4: Python callback to handle incoming events
-    #
-    # This is called every time the kernel sends us an event.
-    # We need to:
-    #   1. Parse the raw data into our struct
-    #   2. Convert IP from u32 to "x.x.x.x" string
-    #   3. Convert port from network byte order to host order
-    # =========================================================
     def _handle_event(self, cpu, data, size):
-        """
-        Callback for processing perf buffer events.
-        
-        Args:
-            cpu: CPU that generated the event
-            data: Raw event data from kernel
-            size: Size of the event data
-        """
-        # Parse raw bytes into our struct
+        """Callback for processing perf buffer events."""
         event = self.bpf["net_events"].event(data)
         
-        # =========================================================
-        # IP Conversion: u32 -> "192.168.1.1"
-        #
-        # socket.inet_ntoa() converts 4 bytes to IP string
-        # struct.pack("I", ...) converts u32 to 4 bytes
-        # "I" = unsigned int (4 bytes), little-endian on x86
-        # =========================================================
+        # Convert IP from network byte order to string
         ip_str = socket.inet_ntoa(struct.pack("I", event.daddr))
         
-        # =========================================================
-        # Port Conversion: Network byte order -> Host byte order
-        #
-        # Network = Big-endian (most significant byte first)
-        # Host (x86) = Little-endian (least significant byte first)
-        # socket.ntohs() does this conversion
-        #
-        # Example: Port 443
-        #   Network order: 0x01BB (bytes: 01 BB)
-        #   After ntohs:   443 (0x01BB interpreted correctly)
-        # =========================================================
-        port = socket.ntohs(event.dport)
+        # Convert port from network byte order to host order
+        remote_port = socket.ntohs(event.dport)
         
-        # Print with [NETWORK] prefix for log clarity
-        print(f"[NETWORK] PID: {event.pid:<6} | UID: {event.uid:<6} | "
-              f"{event.comm.decode('utf-8', 'replace'):<15} -> "
-              f"{ip_str}:{port}")
+        # Local port is already in host byte order (from skc_num)
+        local_port = event.lport
+        
+        comm = event.comm.decode('utf-8', 'replace')
+        
+        # Determine direction string
+        if event.direction == self.DIR_OUTBOUND:
+            direction = "OUT"
+            dest_str = f"→ {ip_str}:{remote_port}"
+        else:
+            direction = "IN"
+            dest_str = f"← {ip_str}:{remote_port} on :{local_port}"
+        
+        # Send to queue
+        self.queue.put({
+            'type': 'NETWORK',
+            'timestamp': time.time(),
+            'direction': direction,
+            'comm': comm,
+            'ip': ip_str,
+            'port': remote_port,
+            'local_port': local_port,
+            'display': dest_str
+        })
     
     def start(self):
         """Start the monitoring loop."""
-        print("[NETWORK] ⚡ Monitor Active (kprobe: tcp_v4_connect)")
-        
-        # Attach our callback to the perf buffer named "net_events"
         self.bpf["net_events"].open_perf_buffer(self._handle_event)
         
-        # Polling loop - check for new events every 100ms
         self.running = True
         while self.running:
             try:
                 self.bpf.perf_buffer_poll(timeout=100)
             except Exception:
-                # Exit loop on any error (including keyboard interrupt)
                 break
     
     def stop(self):
         """Stop the monitoring loop gracefully."""
         self.running = False
-        print("[NETWORK] ✅ Stopped cleanly.")
