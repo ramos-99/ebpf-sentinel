@@ -19,14 +19,15 @@
 ## ✨ Features
 
 - **Real-time Process Monitoring** — Intercepts `execve` syscalls to track all process executions
-- **Kernel-Level Visibility** — Uses eBPF kprobes for zero-overhead introspection
+- **Network Traffic Monitoring** — Tracks TCP connections (connect/accept) with IPv4/IPv6 dual-stack support
+- **Kernel-Level Visibility** — Uses eBPF kprobes/tracepoints for zero-overhead introspection
 - **Lightweight** — No kernel modules required, runs entirely in user space
 - **Self-Supervised ML** — Learns your system's baseline behavior, no external datasets needed
 
 ## 📋 Roadmap
 
 - [x] **Phase 1**: Process execution monitoring (`sys_execve`)
-- [ ] **Phase 2**: Network monitoring (TCP connect/accept)
+- [x] **Phase 2**: Network monitoring (TCP connect/accept, IPv4/IPv6)
 - [ ] **Phase 3**: File access monitoring (`sys_openat`)
 - [ ] **Phase 3.5**: Data persistence (SQLite/Parquet for ML training)
 - [ ] **Phase 4**: ML-based anomaly detection & alerting
