@@ -205,15 +205,15 @@ class NetworkMonitor:
         if event.direction == self.DIR_OUTBOUND:
             direction = "OUT"
             if event.version == self.IP_V6:
-                dest_str = f"→ [{ip_str}]:{remote_port}"
+                dest_str = f"[{ip_str}]:{remote_port}"
             else:
-                dest_str = f"→ {ip_str}:{remote_port}"
+                dest_str = f"{ip_str}:{remote_port}"
         else:
             direction = "IN"
             if event.version == self.IP_V6:
-                dest_str = f"← [{ip_str}]:{remote_port} on :{local_port}"
+                dest_str = f"[{ip_str}]:{remote_port} -> :{local_port}"
             else:
-                dest_str = f"← {ip_str}:{remote_port} on :{local_port}"
+                dest_str = f"{ip_str}:{remote_port} -> :{local_port}"
         
         # Send to queue
         self.queue.put({

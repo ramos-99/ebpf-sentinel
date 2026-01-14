@@ -10,6 +10,7 @@ import os
 import time
 from collections import deque
 from datetime import datetime
+from functools import partial
 
 from rich.console import Console
 from rich.layout import Layout
@@ -23,30 +24,25 @@ from src.probes.process import ProcessMonitor
 from src.probes.network import NetworkMonitor
 
 
-# Global queue and cache
-_queue = None
-_cache = None
-
-# Event buffers (max 20 items per panel)
 MAX_EVENTS = 20
 
 
-def run_process_monitor():
+def run_process_monitor(cache, queue):
     """Wrapper to run ProcessMonitor in a child process."""
     try:
-        monitor = ProcessMonitor(_cache, _queue)
+        monitor = ProcessMonitor(cache, queue)
     except Exception as e:
-        _queue.put({'type': 'ERROR', 'msg': f'[PROCESS] {e}'})
+        queue.put({'type': 'ERROR', 'msg': f'[PROCESS] {e}'})
         sys.exit(1)
     monitor.start()
 
 
-def run_network_monitor():
+def run_network_monitor(queue):
     """Wrapper to run NetworkMonitor in a child process."""
     try:
-        monitor = NetworkMonitor(_queue)
+        monitor = NetworkMonitor(queue)
     except Exception as e:
-        _queue.put({'type': 'ERROR', 'msg': f'[NETWORK] {e}'})
+        queue.put({'type': 'ERROR', 'msg': f'[NETWORK] {e}'})
         sys.exit(1)
     monitor.start()
 
@@ -55,19 +51,16 @@ def make_layout() -> Layout:
     """Create the dashboard layout."""
     layout = Layout()
     
-    # Main split: top (monitors) and bottom (future: ML/Alerts)
     layout.split_column(
         Layout(name="monitors", ratio=3),
         Layout(name="future", ratio=1),
     )
     
-    # Top: Process and Network side by side
     layout["monitors"].split_row(
         Layout(name="process"),
         Layout(name="network"),
     )
     
-    # Bottom: File Monitor and ML placeholders
     layout["future"].split_row(
         Layout(name="files"),
         Layout(name="ml"),
@@ -78,7 +71,7 @@ def make_layout() -> Layout:
 
 def make_process_panel(events: deque) -> Panel:
     """Create the process events panel."""
-    table = Table(show_header=True, header_style="bold cyan", expand=True)
+    table = Table(show_header=True, header_style="bold white", expand=True)
     table.add_column("Time", width=8)
     table.add_column("Root", width=15)
     table.add_column("Process", width=12)
@@ -93,12 +86,12 @@ def make_process_panel(events: deque) -> Panel:
             event['fname']
         )
     
-    return Panel(table, title="[bold green]⚡ Process Monitor[/]", border_style="green")
+    return Panel(table, title="[bold white]Process Monitor[/]", border_style="dim")
 
 
 def make_network_panel(events: deque) -> Panel:
     """Create the network events panel."""
-    table = Table(show_header=True, header_style="bold blue", expand=True)
+    table = Table(show_header=True, header_style="bold white", expand=True)
     table.add_column("Time", width=8)
     table.add_column("Dir", width=3)
     table.add_column("Process", width=12)
@@ -106,53 +99,57 @@ def make_network_panel(events: deque) -> Panel:
     
     for event in events:
         ts = datetime.fromtimestamp(event['timestamp']).strftime('%H:%M:%S')
-        # Color based on direction
-        dir_style = "green" if event.get('direction') == "OUT" else "cyan"
         table.add_row(
             ts,
-            f"[{dir_style}]{event.get('direction', '?')}[/]",
+            event.get('direction', '?'),
             event['comm'],
             event.get('display', f"{event['ip']}:{event['port']}")
         )
     
-    return Panel(table, title="[bold blue]🌐 Network Monitor[/]", border_style="blue")
+    return Panel(table, title="[bold white]Network Monitor[/]", border_style="dim")
 
 
-def make_placeholder_panel(title: str, message: str, style: str) -> Panel:
+def make_placeholder_panel(title: str, message: str) -> Panel:
     """Create a placeholder panel for future features."""
     text = Text(message, justify="center", style="dim")
-    return Panel(text, title=title, border_style=style)
+    return Panel(text, title=title, border_style="dim")
 
 
 def main():
     """Main entry point for ebpf-sentinel."""
-    global _queue, _cache
-    
     console = Console()
     
     # Create shared queue
-    _queue = multiprocessing.Queue()
+    queue = multiprocessing.Queue()
     
     # Create and populate cache
-    console.print("[yellow]📦 Populating process cache...[/]")
-    _cache = ProcessCache()
-    _cache.populate_from_proc()
-    console.print(f"[green]📦 Cache ready: {len(_cache.processes)} processes[/]")
+    console.print("[dim]Populating process cache...[/]")
+    cache = ProcessCache()
+    cache.populate_from_proc()
+    console.print(f"[dim]Cache ready: {len(cache.processes)} processes[/]")
     
     # Ignore SIGINT before forking
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     
     processes = []
-    monitors = [
-        ("ProcessMonitor", run_process_monitor),
-        ("NetworkMonitor", run_network_monitor),
-    ]
     
-    # Start monitors
-    for name, func in monitors:
-        p = multiprocessing.Process(target=func, name=name)
-        p.start()
-        processes.append(p)
+    # Start process monitor with explicit args
+    p1 = multiprocessing.Process(
+        target=run_process_monitor,
+        args=(cache, queue),
+        name="ProcessMonitor"
+    )
+    p1.start()
+    processes.append(p1)
+    
+    # Start network monitor
+    p2 = multiprocessing.Process(
+        target=run_network_monitor,
+        args=(queue,),
+        name="NetworkMonitor"
+    )
+    p2.start()
+    processes.append(p2)
     
     # Event buffers
     process_events = deque(maxlen=MAX_EVENTS)
@@ -175,9 +172,9 @@ def main():
     with Live(layout, console=console, refresh_per_second=4, screen=True) as live:
         while not shutdown:
             # Drain queue (non-blocking)
-            while not _queue.empty():
+            while not queue.empty():
                 try:
-                    event = _queue.get_nowait()
+                    event = queue.get_nowait()
                     if event['type'] == 'PROCESS':
                         process_events.append(event)
                     elif event['type'] == 'NETWORK':
@@ -189,27 +186,25 @@ def main():
             layout["process"].update(make_process_panel(process_events))
             layout["network"].update(make_network_panel(network_events))
             layout["files"].update(make_placeholder_panel(
-                "[bold yellow]📁 File Monitor[/]",
-                "Phase 3: Coming Soon",
-                "yellow"
+                "[bold white]File Monitor[/]",
+                "Phase 3: Coming Soon"
             ))
             layout["ml"].update(make_placeholder_panel(
-                "[bold magenta]🧠 ML Anomaly Detection[/]",
-                "Phase 4: Coming Soon",
-                "magenta"
+                "[bold white]ML Anomaly Detection[/]",
+                "Phase 4: Coming Soon"
             ))
             
             time.sleep(0.1)
     
     # Cleanup
-    console.print("\n[red]🛑 Shutting down...[/]")
+    console.print("\n[dim]Shutting down...[/]")
     for p in processes:
         p.terminate()
     for p in processes:
         p.join(timeout=2)
         if p.is_alive():
             p.kill()
-    console.print("[green]✅ All monitors stopped.[/]")
+    console.print("[dim]All monitors stopped.[/]")
 
 
 if __name__ == "__main__":
