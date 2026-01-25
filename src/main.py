@@ -19,9 +19,7 @@ from rich.table import Table
 from rich.live import Live
 from rich.text import Text
 
-from src.probes.cache import ProcessCache
-from src.probes.process import ProcessMonitor
-from src.probes.network import NetworkMonitor
+from src.probes import ProcessCache, ProcessMonitor, NetworkMonitor
 
 
 MAX_EVENTS = 20

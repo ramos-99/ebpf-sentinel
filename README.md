@@ -1,158 +1,89 @@
-# ebpf-sentinel
+# eBPF-Sentinel
 
-<div align="center">
+![Linux](https://img.shields.io/badge/Linux-FCC624?style=flat-square&logo=linux&logoColor=black)
+![Python](https://img.shields.io/badge/Python-3776AB?style=flat-square&logo=python&logoColor=white)
+![eBPF](https://img.shields.io/badge/eBPF-FF6600?style=flat-square&logo=linux&logoColor=white)
 
-![Linux](https://img.shields.io/badge/Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black)
-![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)
-![eBPF](https://img.shields.io/badge/eBPF-FF6600?style=for-the-badge&logo=linux&logoColor=white)
+**Kernel-level security monitor with self-supervised ML anomaly detection.**
 
-**Kernel-level security monitor with self-supervised ML anomaly detection**
+## Overview
 
-</div>
+eBPF-Sentinel is a high-performance security monitoring tool designed to detect behavioral anomalies in real-time. By leveraging eBPF (Extended Berkeley Packet Filter), it collects deep kernel telemetry with minimal system overhead. The system is designed to learn baseline behavior patterns through self-supervised machine learning, enabling it to flag deviations without reliance on external signature databases.
 
----
+## Key Features
 
-## 🎯 Overview
+*   **Process Execution Monitoring:** Intercepts `execve` syscalls via tracepoints to track all process spawning events.
+*   **Network Traffic Visibility:** Monitors TCP connections (both connect and accept) with full IPv4/IPv6 dual-stack support.
+*   **Kernel-Level Introspection:** Utilizes eBPF kprobes and tracepoints for zero-overhead observability.
+*   **User Space Implementation:** Runs entirely in user space without requiring custom kernel modules.
+*   **Self-Supervised Learning:** Learns system-specific baseline behavior to detect zero-day anomalies.
 
-**ebpf-sentinel** is a process and network monitor built on eBPF technology. It collects kernel-level telemetry and uses machine learning to detect behavioral anomalies — learning what's "normal" for your specific system and alerting on deviations.
+## Implementation Status
 
-## ✨ Features
+| Phase | Component | Status | Description |
+|-------|-----------|--------|-------------|
+| **1** | Process Monitor | ✅ Complete | `sys_execve` tracepoint integration |
+| **2** | Network Monitor | ✅ Complete | TCP connect/accept, IPv6 support |
+| **3** | File Monitor | 🚧 Planned | `sys_openat` monitoring |
+| **4** | ML Detection | 🚧 Planned | Anomaly detection engine |
 
-- **Real-time Process Monitoring** — Intercepts `execve` syscalls to track all process executions
-- **Network Traffic Monitoring** — Tracks TCP connections (connect/accept) with IPv4/IPv6 dual-stack support
-- **Kernel-Level Visibility** — Uses eBPF kprobes/tracepoints for zero-overhead introspection
-- **Lightweight** — No kernel modules required, runs entirely in user space
-- **Self-Supervised ML** — Learns your system's baseline behavior, no external datasets needed
+## Architecture & Design
 
-## 📋 Roadmap
+### Core Components
+1.  **eBPF Probes:** C programs compiled and loaded into the kernel to capture events at the source (kprobes/tracepoints).
+2.  **Perf Buffer:** High-performance ring buffer for transferring data from kernel to user space.
+3.  **Python Consumer:** User-space application that processes events, manages state, and renders the TUI.
+4.  **Process Cache:** In-memory O(1) cache for tracking process ancestry and filtering system noise.
 
-- [x] **Phase 1**: Process execution monitoring (`sys_execve`)
-- [x] **Phase 2**: Network monitoring (TCP connect/accept, IPv4/IPv6)
-- [ ] **Phase 3**: File access monitoring (`sys_openat`)
-- [ ] **Phase 3.5**: Data persistence (SQLite/Parquet for ML training)
-- [ ] **Phase 4**: ML-based anomaly detection & alerting
+### Machine Learning Strategy
+The anomaly detection engine employs a self-supervised approach:
+*   **Data Collection:** Continuous aggregation of process executions and network flows.
+*   **Baseline Learning:** Utilization of Isolation Forests and Autoencoders to model "normal" system behavior.
+*   **Anomaly Detection:** Real-time scoring of events against the learned baseline to identify outliers.
 
-## 🧠 Phase 4: Machine Learning Strategy
+## Prerequisites
 
-The anomaly detection system uses a **self-supervised learning** approach:
+*   Linux Kernel 5.8+ (Required for CO-RE features)
+*   BCC (BPF Compiler Collection)
+*   Python 3.10+
+*   Root privileges (for loading eBPF programs)
 
-### Data Collection
-```
-1 week × 24h × ~1000 events/hour = ~168,000+ training samples
-```
+## Installation & Usage
 
-### Learning Mode
-| Phase | Mode | Description |
-|-------|------|-------------|
-| Week 1 | **Learning** | Collect baseline data, no alerts |
-| After | **Detection** | Compare against learned patterns, alert on anomalies |
+1.  **Clone the repository:**
+    ```bash
+    git clone https://github.com/yourusername/ebpf-sentinel.git
+    cd ebpf-sentinel
+    ```
 
-### What the Model Learns
-- **Temporal patterns** — which processes run at what times (cron jobs, backups)
-- **Process graphs** — parent-child relationships (`bash` → `nvim` → `rg` = normal)
-- **Frequency baselines** — how often each binary is called per hour/day
-- **Network context** — which processes make TCP connections (Phase 2 data)
+2.  **Setup environment:**
+    ```bash
+    make setup
+    ```
+    This command installs necessary system dependencies (`bcc`, `linux-headers`) and sets up the Python virtual environment.
 
-### Techniques
-| Algorithm | Use Case |
-|-----------|----------|
-| **Isolation Forest** | Detect outlier behavior with low overhead |
-| **Autoencoder** | Learn compressed representation of "normal" and flag deviations |
-| **LSTM** | Sequence anomaly detection for process chains |
+3.  **Run the monitor:**
+    ```bash
+    make run
+    ```
+    *Note: Sudo privileges are required to load eBPF programs.*
 
-> 💡 **Key Insight**: Your own system's behavior becomes the training data. No external datasets needed—the monitor runs 24/7 and learns what's "normal" for *your* machine.
-
-## 🔧 Requirements
-
-- Linux (tested on Arch, works on Ubuntu/Debian/Fedora with BCC)
-- Linux kernel headers
-- BCC (BPF Compiler Collection)
-- Python 3.8+
-
-## 🚀 Quick Start
-
-### 1. Clone the Repository
-
-```bash
-git clone https://github.com/yourusername/ebpf-sentinel.git
-cd ebpf-sentinel
-```
-
-### 2. Run Setup
-
-```bash
-make setup
-```
-
-This will:
-- Install system dependencies (`bcc`, `bcc-tools`, `python-bcc`, `linux-headers`)
-- Create a hybrid Python virtual environment
-- Install Python dependencies
-
-### 3. Start Monitoring
-
-```bash
-make run
-```
-
-> ⚡ **Note**: eBPF requires root privileges. The command will prompt for sudo.
-
-### Example Output
-
-```
-⚡ Process Monitor Active... (Ctrl+C to exit)
-PID: 12345  | UID: 1000   | Process: bash            -> Executed: /usr/bin/ls
-PID: 12346  | UID: 1000   | Process: ls              -> Executed: /usr/bin/grep
-PID: 12347  | UID: 0      | Process: sudo            -> Executed: /usr/bin/pacman
-```
-
-## 📁 Project Structure
+## Project Structure
 
 ```
 ebpf-sentinel/
 ├── src/
-│   ├── __init__.py
-│   ├── main.py              # Entry point
-│   └── probes/
-│       ├── __init__.py
-│       └── process.py       # eBPF process monitor
-├── Makefile                 # Build & run automation
-├── requirements.txt         # Python dependencies
-└── README.md
+│   ├── main.py              # Application entry point & TUI
+│   ├── probes/
+│   │   ├── process.py       # eBPF process monitor implementation
+│   │   ├── network.py       # eBPF network monitor (IPv4/IPv6)
+│   │   └── cache.py         # Process ancestry cache
+│   └── config.py            # Configuration & filtering rules
+├── docs/                    # Architecture Decision Records (ADR)
+├── Makefile                 # Build automation
+└── requirements.txt         # Python dependencies
 ```
 
-## 🛠️ Development
+## License
 
-### Clean Environment
-
-```bash
-make clean
-```
-
-### Manual Run (without Make)
-
-```bash
-sudo PYTHONPATH=. ./venv/bin/python src/main.py
-```
-
-## ⚙️ How It Works
-
-1. **eBPF Program** — A small C program is compiled and loaded into the kernel
-2. **Kprobe Attachment** — The program attaches to `sys_execve` syscall
-3. **Event Capture** — Every process execution triggers the probe
-4. **Perf Buffer** — Events are sent to user space via a high-performance ring buffer
-5. **Python Processing** — The Python app decodes and displays events in real-time
-
-## 📜 License
-
-MIT License — See [LICENSE](LICENSE) for details.
-
-## 🤝 Contributing
-
-Contributions are welcome! Please open an issue or submit a pull request.
-
----
-
-<div align="center">
-<sub>Built with ⚡ for learning and security research</sub>
-</div>
+MIT License. See [LICENSE](LICENSE) for details.
